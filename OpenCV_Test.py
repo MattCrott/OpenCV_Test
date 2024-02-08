@@ -6,6 +6,15 @@ import math
 import datetime as dt
 import matplotlib.animation as animation
 
+# global variable for tracking position
+prev_center = [0, 0]
+cent_x = [0, 0, 0]
+cent_y = [0, 0, 0]
+prev_cent_x = [0, 0, 0]
+prev_cent_y = [0, 0, 0]
+xdiff = [0, 0, 0]
+ydiff = [0, 0, 0]
+
 # Plot values in opencv program
 class Plotter:
     def __init__(self, plot_width, plot_height, num_plot_values):
@@ -37,29 +46,39 @@ class Plotter:
             for j in range(len(self.val[0])):
                 cv2.line(self.plot, (i, int(self.height/2) - self.val[i][j]), (i+1, int(self.height/2) - self.val[i+1][j]), self.color[j], 1)
 
+        cv2.putText(self.plot,"x",[10,500],cv2.FONT_HERSHEY_SIMPLEX,1,(255,0,0),2)
+        cv2.putText(self.plot,"y",[10,525],cv2.FONT_HERSHEY_SIMPLEX,1,(0,250,0),2)
+        # cv2.putText(self.plot,"vol",[10,550],cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,250),2)
         cv2.imshow(label, self.plot)
         cv2.waitKey(10)
 
 # setup YOLO
 model = YOLO("yolo0-Weights/yolov8n.pt")
 
-# global variable for tracking position
-prev_center = [0, 0]
-cent_x = 0
-
 # Initialize plot.
-p = Plotter(800, 600, 2) #(plot_width, plot_height)   
+p = Plotter(400, 480, 2) #(plot_width, plot_height)   
 
 #object detection using YOLO
 cap = cv2.VideoCapture(0)
+width  = cap.get(3)  # float `width`
+height = cap.get(4)  # float `height`
+fps = cap.get(5)
+cutoff = 3
+RC = 1/(cutoff * 2 * 3.141)
+dt = 1/fps
+alpha = dt/(RC + dt)
+past_gen_move = 0
+
 while cap.isOpened():
     # capture from the camera
     ret, frame = cap.read()
     results = model.predict(frame, stream=True, classes=0, conf = 0.7, verbose=False)
-        
+    
+
     # coordinates
     for r in results:
         boxes = r.boxes
+        i = 0
 
         for box in boxes:
             # bounding box
@@ -73,11 +92,22 @@ while cap.isOpened():
             confidence = math.ceil((box.conf[0]*100))/100
             # print("Confidence --->",confidence)
 
-            # find center of box
-            cent_x = (x2 - x1)/2
-            cent_y = (y2 - y1)/2
-            center = [cent_x, cent_y]
+            # find center of box. Scale so that the center is 0,0 
+            cent_x[i] = (x2 - (x2 - x1)/2) - width/2
+            cent_y[i] = (y2 - (y2 - y1)/2) - height/2
+
+            xdiff[i] = cent_x[i]-prev_cent_x[i]
+            ydiff[i] = cent_y[i]-prev_cent_y[i]
+            gen_move = (abs(xdiff[i]) + abs(ydiff[i]))*2
+            filt_gen_move = past_gen_move + (alpha * (gen_move - past_gen_move))
+            past_gen_move = filt_gen_move
+
+            if filt_gen_move > 40:
+                print("large movement alert")
+            elif filt_gen_move > 10:
+                print("small movement")
             
+
             # object details
             org = [x1, y1-10]
             org2 = [x1 + 150, y1-10]
@@ -87,30 +117,40 @@ while cap.isOpened():
             thickness = 1
             
             # add direction of movement to
-            scaler = 1
-            if center[0] > prev_center[0] + scaler:
-                direction = "left"
-            elif center[0] < prev_center[0] - scaler:
-                direction = "right"
-            if center[1] > prev_center[1] + scaler:
-                direction = "up"
-            elif center[1] < prev_center[1] - scaler:
-                direction = "down"
+            # scaler = 1
+            # if center[0] > prev_center[0] + scaler:
+            #     direction = "left"
+            # elif center[0] < prev_center[0] - scaler:
+            #     direction = "right"
+            # if center[1] > prev_center[1] + scaler:
+            #     direction = "up"
+            # elif center[1] < prev_center[1] - scaler:
+            #     direction = "down"
             # else:
                 # direction = ""
 
+            vol = ((x2-x1)*(y2-y1)) * 0.001
 
-            prev_direction = direction
-            prev_center = center
-            cv2.putText(frame, f"loc {cent_x},{cent_y}", org, font, 0.5, color, thickness)
-            cv2.putText(frame, direction, org2, font, fontScale, color, 2)
 
-    p.multiplot([int(cent_x), int(cent_y)])
-    cv2.imshow('Webcam', frame)
+            # prev_direction = direction
+            prev_cent_x[i] = cent_x[i]
+            prev_cent_y[i] = cent_y[i]
+            cv2.putText(frame, f"loc {cent_x[i]},{cent_y[i]}", org, font, 0.5, color, thickness)
+            # cv2.putText(frame, direction, org2, font, fontScale, color, 2)
+            i = i + 1
+
+    # wait for the q button to be pressed to exit
     key = cv2.waitKey(1) & 0xFF
-
     if key == ord('q'):
         break
+
+    plot1 = int(cent_x[0])
+    plot2 = int(cent_y[0])
+    p.multiplot([int(gen_move), int(filt_gen_move)])
+    cv2.imshow('Webcam', frame)
+    
+
+    
 
 cap.release()
 cv2.destroyAllWindows()
