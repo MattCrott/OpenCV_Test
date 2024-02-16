@@ -59,15 +59,20 @@ model = YOLO("yolo0-Weights/yolov8n.pt")
 p = Plotter(400, 480, 2) #(plot_width, plot_height)   
 
 #object detection using YOLO
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1,cv2.CAP_DSHOW)
 width  = cap.get(3)  # float `width`
 height = cap.get(4)  # float `height`
+cap.set(cv2.CAP_PROP_FPS,15)
 fps = cap.get(5)
 cutoff = 3
 RC = 1/(cutoff * 2 * 3.141)
 dt = 1/fps
 alpha = dt/(RC + dt)
+gen_move = 0
+filt_gen_move = 0
 past_gen_move = 0
+ret, frame = cap.read()
+cv2.imshow('Webcam', frame)
 
 while cap.isOpened():
     # capture from the camera
