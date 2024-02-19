@@ -7,6 +7,7 @@ import datetime as dt
 import matplotlib.animation as animation
 import threading
 from enum import Enum
+from queue import Queue
 
 # global variable for tracking position
 prev_center = [0, 0]
@@ -16,6 +17,13 @@ prev_cent_x = [0, 0, 0]
 prev_cent_y = [0, 0, 0]
 xdiff = [0, 0, 0]
 ydiff = [0, 0, 0]
+
+# global variables
+respRate = 0
+
+# define constants
+HF_MVMT_THRESH = 1.4
+LF_MVMT_THRESH = 0.1
 
 class CameraType(Enum):
     RGB = 1
@@ -158,18 +166,125 @@ def camPreview(previewName, camID, cameraType, model):
                 
         cap.release()
         cv2.destroyWindow(previewName)
+    elif cameraType == CameraType.THERMAL :
+        while ret:
+            # capture from the camera
+            ret, frame = cap.read()
+            blobResults = model.detect(frame)
 
-## Start of Program
+            frame = cv2.drawKeypoints(frame, blobResults, np.arrayp[])
+        
 
-# setup YOLO
-# model1 = YOLO("yolo0-Weights/yolov8n.pt")
+            # wait for the q button to be pressed to exit
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+
+
+            cv2.imshow(previewName, frame)
+                
+        cap.release()
+        cv2.destroyWindow(previewName)
+    else: print("Camera type not recognised \n")
+
+
+class fusionThread(threading.Thread):
+    def __init__(self, rgbQueue, lwirQueue):
+        threading.Thread.__init__(self)
+        self.rgbQueue = rgbQueue
+        self.lwirQueue = lwirQueue
+    def run(self):
+        # calibration constants for aligning the thermal and RGB cameras
+        lwirXOffset = 10            # TODO find values to offset the LWIR camera - will be dependent on final casing design
+        lwirYOffset = 10
+        lwirXScaler = 1.2           # TODO find values to scale X and Y centroid for lwir onto rgb
+        lwirYScaler = 1.1
+
+        while True:
+
+            # check if person is detected on RGB Camera by seeing if anything is on the rgb queue
+            # note currently this only allows for a single person to be detected
+            while not rgbQueue.empty():
+                rgbVal = rgbQueue.get() #queue values are tuples of (x, y, LF, HF) i.e. centroid x value, centroid y value, low-frequency movement coefficeint, high frequency movement coefficient
+                rgbQueue.task_done()
+            
+            # check if anything is detected on the IR camera
+            while not lwirQueue.empty():
+                lwirVal = lwirQueue.get()
+                lwirQueue.task_done()
+            
+            # if a person and a heat blob has been detected
+            if (('rgbVal' in locals()) & ('lwirVal' in locals())):
+
+                # extract, scale and check that the centroid values line up
+                rgbCentroid = (rgbVal[0], rgbVal[1])
+                lwirCentroid = ((lwirVal[0] + lwirXOffset) * lwirXScaler, (lwirCentroid[1] + lwirYOffset) * lwirYScaler)
+                if(abs(rgbCentroid - lwirCentroid) < 20):
+                    # the RGB and LWIR positionings match - get the current calculated respiratory rate
+                    print("thermal and rgb target aligned")
+                    respMutex.acquire()
+                    rate = respRate
+                    respMutex.release()
+
+                    # check the movement coefficients of the target and publish the respiratory rate 
+                    if (rgbVal[2] < LF_MVMT_THRESH) & (rgbVal[3] < HF_MVMT_THRESH):
+                        print("measured resp rate = " + rate + '\n')
+                    elif (rgbVal[2] > LF_MVMT_THRESH):
+                        print("Low Frequency movement above threshold\n")
+                    else:
+                        print("HIGH Frequency movement above threshold\n")
+
+                else: 
+                    print("thermal and rgb target not aligned")
+
+
+            del rgbVal
+            del lwirVal 
+
+
+class eRadarThread(threading.Thread):
+    def __init__(self, respData, avgSize):
+        threading.Thread.__init__(self)
+        self.respData = respData
+        self.avgSize = avgSize
+    def run(self):
+        while True:
+            # Replicating a live stream of a single resp rate value coming from the hardware
+            # Get the data from the array
+            rate = respData(1)
+            # Wait the required amount of time 
+
+            # Set the value of
+            respMutex.acquire()
+            respRate = rate
+            respMutex.release()
+
+
+
+
+
+## Start of Program ###
 
 # Initialize plot.
 p = Plotter(400, 480, 2) #(plot_width, plot_height)   
 
+# Create two queues for passing 
+rgbQueue = Queue(maxsize=0)
+lwirQueue = Queue(maxsize=0)
+
+# Import the sample respiration data
+respData = [14, 14, 14, 14, 14, 15, 14, 16, 15, 14] # example of data that could be fed out of the eradar - an array of respiratory rates
+rateAvgSize = 3                                     # number of samples used to calculate the respData above
+numRates = len(respData)                            # find the number of resp rates in total
+
+# Create a mutex for ensuring the resp rate values are not accessed at the same time by the multiple threads
+respMutex = threading.Lock()
+
+
 # Create the first thread with the RGB Camera, passing in the YOLO model
 thread1 = camThread("Camera 1", 0, CameraType.RGB, YOLO("yolo0-Weights/yolov8n.pt"))
 # thread2 = camThread("Camera 2", 2)
+thread3 = fusionThread(,)
 thread1.start()
 # thread2.start()
 
