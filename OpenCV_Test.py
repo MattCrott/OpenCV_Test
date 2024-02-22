@@ -7,7 +7,9 @@ import datetime as dt
 import matplotlib.animation as animation
 import threading
 from enum import Enum
-from queue import Queue
+import queue
+import time
+import os
 
 # global variable for tracking position
 prev_center = [0, 0]
@@ -18,8 +20,9 @@ prev_cent_y = [0, 0, 0]
 xdiff = [0, 0, 0]
 ydiff = [0, 0, 0]
 
-# global variables
-respRate = 0
+# Global 
+rgbData = (0, 0, 0, 0)
+lwirData = (0, 0)
 
 # define constants
 HF_MVMT_THRESH = 1.4
@@ -28,6 +31,22 @@ LF_MVMT_THRESH = 0.1
 class CameraType(Enum):
     RGB = 1
     THERMAL = 2
+
+class thermal:
+    def raw_to_8bit(data):
+        cv2.normalize(data, data, 0, 65535, cv2.NORM_MINMAX)
+        np.right_shift(data, 8, data)
+        return cv2.cvtColor(np.uint8(data), cv2.COLOR_GRAY2RGB)
+
+    def ktoc(val):
+        return (val - 27315) / 100.0
+    
+    def display_temperature(img, val_k, loc, color):
+        val = thermal.ktoc(val_k)
+        cv2.putText(img,"{0:.1f} degF".format(val), loc, cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
+        x, y = loc
+        cv2.line(img, (x - 2, y), (x + 2, y), color, 1)
+        cv2.line(img, (x, y - 2), (x, y + 2), color, 1)
 
 # Create class used to graph data in an opencv image
 class Plotter:
@@ -73,19 +92,26 @@ class camThread(threading.Thread):
         self.camID = camID
         self.cameraType = cameraType
         self.model = model
+        if self.cameraType == CameraType.THERMAL:
+            cap = cv2.VideoCapture(camID)
+        else:
+            cap = cv2.VideoCapture(camID,cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            print("Camera not found!")
+            exit(1)
+        self.cap = cap
     def run(self):
         print("Starting " + self.previewName)
-        camPreview(self.previewName, self.camID, self.cameraType, self.model)
+        camView(self)
 
-def camPreview(previewName, camID, cameraType, model):
-    cv2.namedWindow(previewName)
-    cap = cv2.VideoCapture(camID,cv2.CAP_DSHOW)
+def camView(self):
+    cv2.namedWindow(self.previewName, cv2.WINDOW_NORMAL)
 
-    if cap.isOpened():  # try to get the first frame
-        width  = cap.get(3)  # float `width`
-        height = cap.get(4)  # float `height`
-        cap.set(cv2.CAP_PROP_FPS,15)
-        fps = cap.get(5)
+    if self.cap.isOpened():  # try to get the first frame
+        width  = self.cap.get(3)  # float `width`
+        height = self.cap.get(4)  # float `height`
+        self.cap.set(cv2.CAP_PROP_FPS,15)
+        fps = self.cap.get(5)
         cutoff = 3
         RC = 1/(cutoff * 2 * 3.141)
         dt = 1/fps
@@ -93,16 +119,23 @@ def camPreview(previewName, camID, cameraType, model):
         gen_move = 0
         filt_gen_move = 0
         past_gen_move = 0
-        ret, frame = cap.read()
-        cv2.imshow(previewName, frame)
+        ret, frame = self.cap.read()
     else:
         ret = False
 
-    if cameraType == CameraType.RGB :
+    initTime = time.time() * 1000
+    global rgbData
+    global lwirData
+    
+    if self.cameraType == CameraType.RGB :
+        smallMove = 0
+        largeMove = 0
+
         while ret:
             # capture from the camera
-            ret, frame = cap.read()
-            results = model.predict(frame, stream=True, classes=0, conf = 0.7, verbose=False)
+            ret, frame = self.cap.read()
+            results = self.model.predict(frame, stream=True, classes=0, conf = 0.5, verbose=False)
+            capTime = time.time() * 1000
 
             # coordinates
             for r in results:
@@ -118,7 +151,7 @@ def camPreview(previewName, camID, cameraType, model):
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 3)
 
                     # confidence
-                    confidence = math.ceil((box.conf[0]*100))/100
+                    # confidence = math.ceil((box.conf[0]*100))/100
                     # print("Confidence --->",confidence)
 
                     # find center of box. Scale so that the center is 0,0 
@@ -131,27 +164,20 @@ def camPreview(previewName, camID, cameraType, model):
                     filt_gen_move = past_gen_move + (alpha * (gen_move - past_gen_move))
                     past_gen_move = filt_gen_move
 
-                    if filt_gen_move > 40:
-                        print("large movement alert")
-                    elif filt_gen_move > 10:
-                        print("small movement")
-                    
-
-                    # object details
-                    org = [x1, y1-10]
-                    org2 = [x1 + 150, y1-10]
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    fontScale = 1
-                    color = (255, 0, 255)
-                    thickness = 1
+                    if filt_gen_move > 50:
+                        largeMove = filt_gen_move
+                    elif filt_gen_move > 20:
+                        smallMove = filt_gen_move
+                    else:
+                        smallMove = largeMove = 0
                 
                     vol = ((x2-x1)*(y2-y1)) * 0.001
 
                     # prev_direction = direction
                     prev_cent_x[i] = cent_x[i]
                     prev_cent_y[i] = cent_y[i]
-                    cv2.putText(frame, f"loc {cent_x[i]},{cent_y[i]}", org, font, 0.5, color, thickness)
-                    # cv2.putText(frame, direction, org2, font, fontScale, color, 2)
+
+                    # index for the number of results
                     i = i + 1
 
             # wait for the q button to be pressed to exit
@@ -159,21 +185,47 @@ def camPreview(previewName, camID, cameraType, model):
             if key == ord('q'):
                 break
 
-            plot1 = int(cent_x[0])
-            plot2 = int(cent_y[0])
-            p.multiplot([int(gen_move), int(filt_gen_move)])
-            cv2.imshow(previewName, frame)
+            # plot1 = int(cent_x[0])
+            # plot2 = int(cent_y[0])
+            # p.multiplot([int(gen_move), int(filt_gen_move)])
+
+            if(capTime - initTime >= 66.67 ):
+                rgbMutex.acquire()
+                rgbData = (cent_x[0], cent_y[0], smallMove, largeMove)
+                rgbMutex.release()
+                initTime = round(time.time() * 1000)
+
+            cv2.imshow(self.previewName, frame)
                 
-        cap.release()
-        cv2.destroyWindow(previewName)
-    elif cameraType == CameraType.THERMAL :
+        self.cap.release()
+        cv2.destroyWindow(self.previewName)
+
+    elif self.cameraType == CameraType.THERMAL :
+
         while ret:
             # capture from the camera
-            ret, frame = cap.read()
-            blobResults = model.detect(frame)
+            ret, frame = self.cap.read()
+            gray1 = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            capTime = time.time() * 1000
 
-            frame = cv2.drawKeypoints(frame, blobResults, np.arrayp[])
-        
+            ret1, thresh = cv2.threshold(gray1, 120,255, cv2.THRESH_BINARY)
+
+            # calculate moments of binary image
+            M = cv2.moments(thresh)
+            
+            # calculate x,y coordinate of center
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+            centroid = (cX - width/2, cY - height/2)
+            # put text and highlight the center
+            cv2.circle(frame, (cX, cY), 2, (255, 255, 255), -1)
+            cv2.putText(frame, "centroid", (cX - 25, cY - 25),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+            if(capTime - initTime >= 66.67 ):
+                lwirMutex.acquire()
+                lwirData = centroid
+                lwirMutex.release()
+                initTime = time.time() * 1000
 
             # wait for the q button to be pressed to exit
             key = cv2.waitKey(1) & 0xFF
@@ -181,112 +233,129 @@ def camPreview(previewName, camID, cameraType, model):
                 break
 
 
-            cv2.imshow(previewName, frame)
+            cv2.imshow(self.previewName, cv2.resize(frame, (640,480)))
+            # gray2 = gray1
                 
-        cap.release()
-        cv2.destroyWindow(previewName)
+        self.cap.release()
+        cv2.destroyWindow(self.previewName)
     else: print("Camera type not recognised \n")
 
-
 class fusionThread(threading.Thread):
-    def __init__(self, rgbQueue, lwirQueue):
+    def __init__(self,rateQueue):
         threading.Thread.__init__(self)
-        self.rgbQueue = rgbQueue
-        self.lwirQueue = lwirQueue
+        self.rateQueue = rateQueue
     def run(self):
+        print("Fusion thread starting")
+
         # calibration constants for aligning the thermal and RGB cameras
-        lwirXOffset = 10            # TODO find values to offset the LWIR camera - will be dependent on final casing design
-        lwirYOffset = 10
-        lwirXScaler = 1.2           # TODO find values to scale X and Y centroid for lwir onto rgb
-        lwirYScaler = 1.1
+        lwirXOffset = 0           
+        lwirYOffset = 0
+        lwirXScaler = 4           
+        lwirYScaler = 4
+        global rgbData
+        global lwirData
 
         while True:
 
-            # check if person is detected on RGB Camera by seeing if anything is on the rgb queue
-            # note currently this only allows for a single person to be detected
-            while not rgbQueue.empty():
-                rgbVal = rgbQueue.get() #queue values are tuples of (x, y, LF, HF) i.e. centroid x value, centroid y value, low-frequency movement coefficeint, high frequency movement coefficient
-                rgbQueue.task_done()
-            
-            # check if anything is detected on the IR camera
-            while not lwirQueue.empty():
-                lwirVal = lwirQueue.get()
-                lwirQueue.task_done()
-            
-            # if a person and a heat blob has been detected
-            if (('rgbVal' in locals()) & ('lwirVal' in locals())):
+            # check if there is a resp rate on the queue
+            if not rateQueue.empty():            
+                rate = rateQueue.get()
+                rateQueue.task_done()
 
+                # Get the RGB and LWIR centroid data 
+                # check if person is detected on RGB Camera by seeing if anything is on the rgb queue
+                # note currently this only allows for a single person to be detected
+                rgbMutex.acquire()
+                rgbVal = rgbData #queue values are tuples of (x, y, LF, HF) i.e. centroid x value, centroid y value, low-frequency movement coefficeint, high frequency movement coefficient
+                rgbMutex.release()
+                
+                # check if anything is detected on the IR camera
+                lwirMutex.acquire()
+                lwirVal = lwirData
+                lwirMutex.release()
+            
                 # extract, scale and check that the centroid values line up
                 rgbCentroid = (rgbVal[0], rgbVal[1])
-                lwirCentroid = ((lwirVal[0] + lwirXOffset) * lwirXScaler, (lwirCentroid[1] + lwirYOffset) * lwirYScaler)
-                if(abs(rgbCentroid - lwirCentroid) < 20):
-                    # the RGB and LWIR positionings match - get the current calculated respiratory rate
-                    print("thermal and rgb target aligned")
-                    respMutex.acquire()
-                    rate = respRate
-                    respMutex.release()
+                lwirCentroid = ((lwirVal[0] + lwirXOffset) * lwirXScaler, (lwirVal[1] + lwirYOffset) * lwirYScaler)
+                centroidDiff = tuple(np.abs(np.subtract(np.abs(rgbCentroid),np.abs(lwirCentroid))))
 
-                    # check the movement coefficients of the target and publish the respiratory rate 
-                    if (rgbVal[2] < LF_MVMT_THRESH) & (rgbVal[3] < HF_MVMT_THRESH):
-                        print("measured resp rate = " + rate + '\n')
-                    elif (rgbVal[2] > LF_MVMT_THRESH):
-                        print("Low Frequency movement above threshold\n")
+                # check if the RGB and LWIR positionings match - get the current calculated respiratory rate
+                if (centroidDiff < (20,20)):
+                    if (rgbVal[3] > 0):
+                        print("resp rate detected but issue with large movements")
                     else:
-                        print("HIGH Frequency movement above threshold\n")
+                        print("respiratory rate = " + str(rate))
+                else:
+                    print("resp rate calculated but issue with thermal alignment")
+                    
+                    
 
-                else: 
-                    print("thermal and rgb target not aligned")
-
-
-            del rgbVal
-            del lwirVal 
+                #     # check the movement coefficients of the target and publish the respiratory rate 
+                #     if (rgbVal[2] < LF_MVMT_THRESH) & (rgbVal[3] < HF_MVMT_THRESH):
+                #         print("measured resp rate = " + rate + '\n')
+                #     elif (rgbVal[2] > LF_MVMT_THRESH):
+                #         print("Low Frequency movement above threshold\n")
+                #     else:
+                #         print("HIGH Frequency movement above threshold\n")
 
 
 class eRadarThread(threading.Thread):
-    def __init__(self, respData, avgSize):
+    def __init__(self, respData, avgSize, rateQueue):
         threading.Thread.__init__(self)
         self.respData = respData
         self.avgSize = avgSize
+        self.rateQueue = rateQueue
+
     def run(self):
-        while True:
+
+        length = len(self.respData)
+        global respRate
+        for x in range(length):
             # Replicating a live stream of a single resp rate value coming from the hardware
             # Get the data from the array
-            rate = respData(1)
-            # Wait the required amount of time 
+            currentRate = self.respData[x]
 
-            # Set the value of
-            respMutex.acquire()
-            respRate = rate
-            respMutex.release()
+            # Set the value of the global variable
+            rateQueue.put(currentRate)
+
+            time.sleep(60/currentRate)
+        print("no more resp rates in data set")
+        os._exit()
+
 
 
 
 
 
 ## Start of Program ###
+if __name__ == '__main__':
+    # Initialize plot.
+    # p = Plotter(400, 480, 2) #(plot_width, plot_height)   
 
-# Initialize plot.
-p = Plotter(400, 480, 2) #(plot_width, plot_height)   
+    # Create queue for passing resprate data
+    rateQueue = queue.Queue(maxsize=0)
 
-# Create two queues for passing 
-rgbQueue = Queue(maxsize=0)
-lwirQueue = Queue(maxsize=0)
+    # Import the sample respiration data
+    respData = [14, 14, 14, 14, 14, 15, 14, 16, 15, 14, 16, 16, 12, 12, 9, 12, 16, 15, 14] # example of data that could be fed out of the eradar - an array of respiratory rates
+    rateAvgSize = 3                                     # number of samples used to calculate the respData above
+    numRates = len(respData)                            # find the number of resp rates in total
 
-# Import the sample respiration data
-respData = [14, 14, 14, 14, 14, 15, 14, 16, 15, 14] # example of data that could be fed out of the eradar - an array of respiratory rates
-rateAvgSize = 3                                     # number of samples used to calculate the respData above
-numRates = len(respData)                            # find the number of resp rates in total
+    # Create a mutex for ensuring the resp rate values are not accessed at the same time by the multiple threads
+    rgbMutex = threading.Lock()
+    lwirMutex = threading.Lock()
 
-# Create a mutex for ensuring the resp rate values are not accessed at the same time by the multiple threads
-respMutex = threading.Lock()
+    # Create the first thread with the RGB Camera, passing in the YOLO model
+    LWIR_THREAD = camThread("LWIR Camera", 2, CameraType.THERMAL, 1)
+    RGB_THREAD = camThread("RGB Camera", 1, CameraType.RGB, YOLO("yolo0-Weights/yolov8n.pt"))
+    FUSION_THREAD = fusionThread(rateQueue)
+    ERADAR_THREAD = eRadarThread(respData, rateAvgSize, rateQueue)
 
+    LWIR_THREAD.start()
+    RGB_THREAD.start()
 
-# Create the first thread with the RGB Camera, passing in the YOLO model
-thread1 = camThread("Camera 1", 0, CameraType.RGB, YOLO("yolo0-Weights/yolov8n.pt"))
-# thread2 = camThread("Camera 2", 2)
-thread3 = fusionThread(,)
-thread1.start()
-# thread2.start()
+    time.sleep(5)
+    FUSION_THREAD.start()
+    ERADAR_THREAD.start()
 
 
 
