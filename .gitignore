@@ -1,3 +1,15 @@
+# outputs of video/images
+*.avi
+*.jpg 
+*.mp4 
+
+# models & weights
+*.weights
+*.conv.74
+*.pth
+*.pt
+*.caffemodel
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
